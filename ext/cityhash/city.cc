@@ -513,7 +513,45 @@ uint128 CityHash128(const char *s, size_t len) {
 
 #ifdef __SSE4_2__
 #include <citycrc.h>
-#include <nmmintrin.h>
+#include <cstdint>
+#include <cstring>
+
+/* Include Intel intrinsics only on x86_64 */
+#if defined(__x86_64__) || defined(_M_X64)
+# include <nmmintrin.h>
+# define CITYHASH_HAVE_SSE42 1
+#else
+ /* On non-x86 (ARM64/Apple Silicon) provide a fallback below */
+# define CITYHASH_HAVE_SSE42 0
+#endif
+
+/* Portable CRC32 wrapper: uses hardware intrinsic on x86_64 when available,
+   otherwise falls back to a simple mixing function. The fallback does not
+   produce identical CRC32 outputs as the intrinsic, but it is deterministic
+   and allows the code to compile and run on ARM/Apple Silicon. */
+
+#if CITYHASH_HAVE_SSE42
+  /* Use builtin Intel CRC32 intrinsic */
+  static inline uint64_t CRC32_U64_FALLBACK(uint64_t crc, uint64_t v) {
+    /* The intrinsic returns unsigned int for crc32 and expects the crc as
+       unsigned long long on some platforms; cast to keep clean types. */
+    return (uint64_t)_mm_crc32_u64((unsigned long long)crc, (unsigned long long)v);
+  }
+#else
+  /* Simple fallback mixing for platforms without CRC intrinsics */
+  #include <stdint.h>
+  static inline uint64_t CRC32_U64_FALLBACK(uint64_t crc, uint64_t v) {
+    /* A simple but decent 64-bit mix (not CRC32) to preserve churn in the
+       algorithm; keeps builds portable on ARM */
+    uint64_t x = crc ^ v;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+  }
+#endif
 
 // Requires len >= 240.
 static void CityHashCrc256Long(const char *s, size_t len,
@@ -549,9 +587,9 @@ static void CityHashCrc256Long(const char *s, size_t len,
     g += e;                                     \
     e += z;                                     \
     g += x;                                     \
-    z = _mm_crc32_u64(z, b + g);                \
-    y = _mm_crc32_u64(y, e + h);                \
-    x = _mm_crc32_u64(x, f + a);                \
+    z = CRC32_U64_FALLBACK(z, b + g);           \
+    y = CRC32_U64_FALLBACK(y, e + h);           \
+    x = CRC32_U64_FALLBACK(x, f + a);           \
     e = Rotate(e, r);                           \
     c += e;                                     \
     s += 40
